@@ -24,7 +24,7 @@ Usage of azure_sql_exporter:
   -log.level value
     	Only log messages with the given severity or above. Valid levels: [debug, info, warn, error, fatal, panic]. (default info)
   -web.listen-address string
-    	Address to listen on for web interface and telemetry. (default ":9104")
+    	Address to listen on for web interface and telemetry. (default ":9139")
   -web.telemetry-path string
     	Path under which to expose metrics. (default "/metrics")
 ```
