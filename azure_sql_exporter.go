@@ -19,7 +19,7 @@ var (
 	// Version of azure_sql_exporter. Set at build time.
 	Version = "0.0.0.dev"
 
-	listenAddress = flag.String("web.listen-address", ":9104", "Address to listen on for web interface and telemetry.")
+	listenAddress = flag.String("web.listen-address", ":9139", "Address to listen on for web interface and telemetry.")
 	metricsPath   = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
 	configFile    = flag.String("config.file", "./config.yaml", "Specify the config file with the database credentials.")
 )
