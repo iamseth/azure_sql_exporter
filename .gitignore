@@ -1,0 +1,3 @@
+azure_sql_exporter
+dist/
+config.yaml
