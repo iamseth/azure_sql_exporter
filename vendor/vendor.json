@@ -1,0 +1,80 @@
+{
+	"comment": "",
+	"ignore": "test",
+	"package": [
+		{
+			"checksumSHA1": "kO2MAzPuortudABaRd7fY+7EaoM=",
+			"path": "github.com/prometheus/procfs",
+			"revision": "406e5b7bfd8201a36e2bb5f7bdae0b03380c2ce8",
+			"revisionTime": "2015-10-29T15:50:50-04:00"
+		},
+		{
+			"checksumSHA1": "MCeXr2RNeiG1XG6V+er1OR0qyeo=",
+			"path": "golang.org/x/crypto/md4",
+			"revision": "9e7f5dc375abeb9619ea3c5c58502c428f457aa2",
+			"revisionTime": "2016-03-17T12:45:02+01:00"
+		},
+		{
+			"path": "gopkg.in/yaml.v2",
+			"revision": "7ad95dd0798a40da1ccdff6dff35fd177b5edf40",
+			"revisionTime": "2015-06-24T11:29:02+01:00"
+		},
+		{
+			"path": "gopkg.in/yaml.v2",
+			"revision": "7ad95dd0798a40da1ccdff6dff35fd177b5edf40",
+			"revisionTime": "2015-06-24T11:29:02+01:00"
+		},
+		{
+			"path": "gopkg.in/yaml.v2",
+			"revision": "7ad95dd0798a40da1ccdff6dff35fd177b5edf40",
+			"revisionTime": "2015-06-24T11:29:02+01:00"
+		},
+		{
+			"path": "gopkg.in/yaml.v2",
+			"revision": "7ad95dd0798a40da1ccdff6dff35fd177b5edf40",
+			"revisionTime": "2015-06-24T11:29:02+01:00"
+		},
+		{
+			"checksumSHA1": "KgT+peLCcuh0/m2mpoOZXuxXmwc=",
+			"path": "gopkg.in/yaml.v2",
+			"revision": "7ad95dd0798a40da1ccdff6dff35fd177b5edf40",
+			"revisionTime": "2015-06-24T11:29:02+01:00"
+		},
+		{
+			"path": "gopkg.in/yaml.v2",
+			"revision": "7ad95dd0798a40da1ccdff6dff35fd177b5edf40",
+			"revisionTime": "2015-06-24T11:29:02+01:00"
+		},
+		{
+			"checksumSHA1": "KgT+peLCcuh0/m2mpoOZXuxXmwc=",
+			"path": "gopkg.in/yaml.v2",
+			"revision": "7ad95dd0798a40da1ccdff6dff35fd177b5edf40",
+			"revisionTime": "2015-06-24T11:29:02+01:00"
+		},
+		{
+			"path": "gopkg.in/yaml.v2",
+			"revision": "7ad95dd0798a40da1ccdff6dff35fd177b5edf40",
+			"revisionTime": "2015-06-24T11:29:02+01:00"
+		},
+		{
+			"path": "gopkg.in/yaml.v2",
+			"revision": "7ad95dd0798a40da1ccdff6dff35fd177b5edf40",
+			"revisionTime": "2015-06-24T11:29:02+01:00"
+		},
+		{
+			"path": "gopkg.in/yaml.v2",
+			"revision": "7ad95dd0798a40da1ccdff6dff35fd177b5edf40",
+			"revisionTime": "2015-06-24T11:29:02+01:00"
+		},
+		{
+			"path": "gopkg.in/yaml.v2",
+			"revision": "7ad95dd0798a40da1ccdff6dff35fd177b5edf40",
+			"revisionTime": "2015-06-24T11:29:02+01:00"
+		},
+		{
+			"path": "gopkg.in/yaml.v2",
+			"revision": "7ad95dd0798a40da1ccdff6dff35fd177b5edf40",
+			"revisionTime": "2015-06-24T11:29:02+01:00"
+		}
+	]
+}
