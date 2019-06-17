@@ -1,4 +1,4 @@
-VERSION := 0.1.0
+VERSION := 0.1.1
 
 LDFLAGS := -X main.Version=$(VERSION)
 GOFLAGS := -ldflags "$(LDFLAGS)"
@@ -26,4 +26,4 @@ format:
 
 .PHONY: docker
 docker:
-	docker run --rm -v "$$PWD":/go/src/github.com/iamseth/azure_sql_exporter -w /go/src/github.com/iamseth/azure_sql_exporter golang:1.6 bash -c make
+	docker build -t benclapp/azure_sql_exporter:$(VERSION) -t benclapp/azure_sql_exporter:latest .

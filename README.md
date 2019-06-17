@@ -54,3 +54,11 @@ databases:
 ## Binary releases
 
 Pre-compiled versions may be found in the [release section](https://github.com/iamseth/azure_sql_exporter/releases).
+
+## Docker
+
+A Dockerfile is provided, or images are available on [Docker Hub](https://hub.docker.com/r/benclapp/azure_sql_exporter/). For example:
+
+```bash
+docker run -d -p 9139:9139 -v ./config.yaml:/config/config.yaml benclapp/azure_sql_exporter:latest -config.file /config/config.yaml
+```
