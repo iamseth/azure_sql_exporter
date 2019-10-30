@@ -26,4 +26,4 @@ format:
 
 .PHONY: docker
 docker:
-	docker run --rm -v "$$PWD":/go/src/github.com/iamseth/azure_sql_exporter -w /go/src/github.com/iamseth/azure_sql_exporter golang:1.6 bash -c make
+	docker run --rm -v "$$PWD":/go/src/github.com/iamseth/azure_sql_exporter -w /go/src/github.com/iamseth/azure_sql_exporter golang:1.8 bash -c make
