@@ -1,6 +1,7 @@
 package mssql
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
@@ -9,11 +10,9 @@ import (
 	"io"
 	"io/ioutil"
 	"net"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 	"unicode/utf16"
 	"unicode/utf8"
 )
@@ -47,13 +46,14 @@ func parseInstances(msg []byte) map[string]map[string]string {
 	return results
 }
 
-func getInstances(address string) (map[string]map[string]string, error) {
-	conn, err := net.DialTimeout("udp", address+":1434", 5*time.Second)
+func getInstances(ctx context.Context, d Dialer, address string) (map[string]map[string]string, error) {
+	conn, err := d.DialContext(ctx, "udp", address+":1434")
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(5*time.Second))
+	deadline, _ := ctx.Deadline()
+	conn.SetDeadline(deadline)
 	_, err = conn.Write([]byte{3})
 	if err != nil {
 		return nil, err
@@ -79,11 +79,16 @@ const (
 )
 
 // packet types
+// https://msdn.microsoft.com/en-us/library/dd304214.aspx
 const (
-	packSQLBatch    = 1
-	packRPCRequest  = 3
-	packReply       = 4
-	packCancel      = 6
+	packSQLBatch   packetType = 1
+	packRPCRequest            = 3
+	packReply                 = 4
+
+	// 2.2.1.7 Attention: https://msdn.microsoft.com/en-us/library/dd341449.aspx
+	// 4.19.2 Out-of-Band Attention Signal: https://msdn.microsoft.com/en-us/library/dd305167.aspx
+	packAttention = 6
+
 	packBulkLoadBCP = 7
 	packTransMgrReq = 14
 	packNormal      = 15
@@ -119,7 +124,7 @@ type tdsSession struct {
 	columns      []columnStruct
 	tranid       uint64
 	logFlags     uint64
-	log          *Logger
+	log          optionalLogger
 	routedServer string
 	routedPort   uint16
 }
@@ -131,6 +136,7 @@ const (
 	logSQL         = 8
 	logParams      = 16
 	logTransaction = 32
+	logDebug       = 64
 )
 
 type columnStruct struct {
@@ -140,19 +146,19 @@ type columnStruct struct {
 	ti       typeInfo
 }
 
-type KeySlice []uint8
+type keySlice []uint8
 
-func (p KeySlice) Len() int           { return len(p) }
-func (p KeySlice) Less(i, j int) bool { return p[i] < p[j] }
-func (p KeySlice) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+func (p keySlice) Len() int           { return len(p) }
+func (p keySlice) Less(i, j int) bool { return p[i] < p[j] }
+func (p keySlice) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 
 // http://msdn.microsoft.com/en-us/library/dd357559.aspx
 func writePrelogin(w *tdsBuffer, fields map[uint8][]byte) error {
 	var err error
 
-	w.BeginPacket(packPrelogin)
+	w.BeginPacket(packPrelogin, false)
 	offset := uint16(5*len(fields) + 1)
-	keys := make(KeySlice, 0, len(fields))
+	keys := make(keySlice, 0, len(fields))
 	for k, _ := range fields {
 		keys = append(keys, k)
 	}
@@ -340,7 +346,7 @@ func manglePassword(password string) []byte {
 
 // http://msdn.microsoft.com/en-us/library/dd304019.aspx
 func sendLogin(w *tdsBuffer, login login) error {
-	w.BeginPacket(packLogin7)
+	w.BeginPacket(packLogin7, false)
 	hostname := str2ucs2(login.HostName)
 	username := str2ucs2(login.UserName)
 	password := manglePassword(login.Password)
@@ -462,10 +468,9 @@ func readUcs2(r io.Reader, numchars int) (res string, err error) {
 }
 
 func readUsVarChar(r io.Reader) (res string, err error) {
-	var numchars uint16
-	err = binary.Read(r, binary.LittleEndian, &numchars)
+	numchars, err := readUshort(r)
 	if err != nil {
-		return "", err
+		return
 	}
 	return readUcs2(r, int(numchars))
 }
@@ -485,10 +490,14 @@ func writeUsVarChar(w io.Writer, s string) (err error) {
 }
 
 func readBVarChar(r io.Reader) (res string, err error) {
-	var numchars uint8
-	err = binary.Read(r, binary.LittleEndian, &numchars)
+	numchars, err := readByte(r)
 	if err != nil {
 		return "", err
+	}
+
+	// A zero length could be returned, return an empty string
+	if numchars == 0 {
+		return "", nil
 	}
 	return readUcs2(r, int(numchars))
 }
@@ -508,8 +517,7 @@ func writeBVarChar(w io.Writer, s string) (err error) {
 }
 
 func readBVarByte(r io.Reader) (res []byte, err error) {
-	var length uint8
-	err = binary.Read(r, binary.LittleEndian, &length)
+	length, err := readByte(r)
 	if err != nil {
 		return
 	}
@@ -543,6 +551,36 @@ const (
 	dataStmHdrTraceActivity = 3
 )
 
+// Query Notifications Header
+// http://msdn.microsoft.com/en-us/library/dd304949.aspx
+type queryNotifHdr struct {
+	notifyId      string
+	ssbDeployment string
+	notifyTimeout uint32
+}
+
+func (hdr queryNotifHdr) pack() (res []byte) {
+	notifyId := str2ucs2(hdr.notifyId)
+	ssbDeployment := str2ucs2(hdr.ssbDeployment)
+
+	res = make([]byte, 2+len(notifyId)+2+len(ssbDeployment)+4)
+	b := res
+
+	binary.LittleEndian.PutUint16(b, uint16(len(notifyId)))
+	b = b[2:]
+	copy(b, notifyId)
+	b = b[len(notifyId):]
+
+	binary.LittleEndian.PutUint16(b, uint16(len(ssbDeployment)))
+	b = b[2:]
+	copy(b, ssbDeployment)
+	b = b[len(ssbDeployment):]
+
+	binary.LittleEndian.PutUint32(b, hdr.notifyTimeout)
+
+	return res
+}
+
 // MARS Transaction Descriptor Header
 // http://msdn.microsoft.com/en-us/library/dd340515.aspx
 type transDescrHdr struct {
@@ -558,7 +596,7 @@ func (hdr transDescrHdr) pack() (res []byte) {
 }
 
 func writeAllHeaders(w io.Writer, headers []headerStruct) (err error) {
-	// calculatint total length
+	// Calculating total length.
 	var totallen uint32 = 4
 	for _, hdr := range headers {
 		totallen += 4 + 2 + uint32(len(hdr.data))
@@ -586,186 +624,28 @@ func writeAllHeaders(w io.Writer, headers []headerStruct) (err error) {
 	return nil
 }
 
-func sendSqlBatch72(buf *tdsBuffer,
-	sqltext string,
-	headers []headerStruct) (err error) {
-	buf.BeginPacket(packSQLBatch)
+func sendSqlBatch72(buf *tdsBuffer, sqltext string, headers []headerStruct, resetSession bool) (err error) {
+	buf.BeginPacket(packSQLBatch, resetSession)
 
-	writeAllHeaders(buf, headers)
+	if err = writeAllHeaders(buf, headers); err != nil {
+		return
+	}
 
 	_, err = buf.Write(str2ucs2(sqltext))
 	if err != nil {
-		return err
+		return
 	}
 	return buf.FinishPacket()
 }
 
-type connectParams struct {
-	logFlags               uint64
-	port                   uint64
-	host                   string
-	instance               string
-	database               string
-	user                   string
-	password               string
-	dial_timeout           time.Duration
-	conn_timeout           time.Duration
-	keepAlive              time.Duration
-	encrypt                bool
-	disableEncryption      bool
-	trustServerCertificate bool
-	certificate            string
-	hostInCertificate      string
-	serverSPN              string
-	workstation            string
-	appname                string
-	typeFlags              uint8
+// 2.2.1.7 Attention: https://msdn.microsoft.com/en-us/library/dd341449.aspx
+// 4.19.2 Out-of-Band Attention Signal: https://msdn.microsoft.com/en-us/library/dd305167.aspx
+func sendAttention(buf *tdsBuffer) error {
+	buf.BeginPacket(packAttention, false)
+	return buf.FinishPacket()
 }
 
-func parseConnectParams(params map[string]string) (*connectParams, error) {
-	var p connectParams
-	strlog, ok := params["log"]
-	if ok {
-		var err error
-		p.logFlags, err = strconv.ParseUint(strlog, 10, 0)
-		if err != nil {
-			return nil, fmt.Errorf("Invalid log parameter '%s': %s", strlog, err.Error())
-		}
-	}
-	server := params["server"]
-	parts := strings.SplitN(server, "\\", 2)
-	p.host = parts[0]
-	if p.host == "." || strings.ToUpper(p.host) == "(LOCAL)" || p.host == "" {
-		p.host = "localhost"
-	}
-	if len(parts) > 1 {
-		p.instance = parts[1]
-	}
-	p.database = params["database"]
-	p.user = params["user id"]
-	p.password = params["password"]
-	p.port = 1433
-	if p.instance != "" {
-		p.instance = strings.ToUpper(p.instance)
-		instances, err := getInstances(p.host)
-		if err != nil {
-			f := "Unable to get instances from Sql Server Browser on host %v: %v"
-			return nil, fmt.Errorf(f, p.host, err.Error())
-		}
-		strport, ok := instances[p.instance]["tcp"]
-		if !ok {
-			f := "No instance matching '%v' returned from host '%v'"
-			return nil, fmt.Errorf(f, p.instance, p.host)
-		}
-		p.port, err = strconv.ParseUint(strport, 0, 16)
-		if err != nil {
-			f := "Invalid tcp port returned from Sql Server Browser '%v': %v"
-			return nil, fmt.Errorf(f, strport, err.Error())
-		}
-	} else {
-		strport, ok := params["port"]
-		if ok {
-			var err error
-			p.port, err = strconv.ParseUint(strport, 0, 16)
-			if err != nil {
-				f := "Invalid tcp port '%v': %v"
-				return nil, fmt.Errorf(f, strport, err.Error())
-			}
-		}
-	}
-	p.dial_timeout = 5 * time.Second
-	p.conn_timeout = 30 * time.Second
-	strconntimeout, ok := params["connection timeout"]
-	if ok {
-		timeout, err := strconv.ParseUint(strconntimeout, 0, 16)
-		if err != nil {
-			f := "Invalid connection timeout '%v': %v"
-			return nil, fmt.Errorf(f, strconntimeout, err.Error())
-		}
-		p.conn_timeout = time.Duration(timeout) * time.Second
-	}
-	strdialtimeout, ok := params["dial timeout"]
-	if ok {
-		timeout, err := strconv.ParseUint(strdialtimeout, 0, 16)
-		if err != nil {
-			f := "Invalid dial timeout '%v': %v"
-			return nil, fmt.Errorf(f, strdialtimeout, err.Error())
-		}
-		p.dial_timeout = time.Duration(timeout) * time.Second
-	}
-	keepAlive, ok := params["keepalive"]
-	if ok {
-		timeout, err := strconv.ParseUint(keepAlive, 0, 16)
-		if err != nil {
-			f := "Invalid keepAlive value '%s': %s"
-			return nil, fmt.Errorf(f, keepAlive, err.Error())
-		}
-		p.keepAlive = time.Duration(timeout) * time.Second
-	}
-	encrypt, ok := params["encrypt"]
-	if ok {
-		if strings.ToUpper(encrypt) == "DISABLE" {
-			p.disableEncryption = true
-		} else {
-			var err error
-			p.encrypt, err = strconv.ParseBool(encrypt)
-			if err != nil {
-				f := "Invalid encrypt '%s': %s"
-				return nil, fmt.Errorf(f, encrypt, err.Error())
-			}
-		}
-	} else {
-		p.trustServerCertificate = true
-	}
-	trust, ok := params["trustservercertificate"]
-	if ok {
-		var err error
-		p.trustServerCertificate, err = strconv.ParseBool(trust)
-		if err != nil {
-			f := "Invalid trust server certificate '%s': %s"
-			return nil, fmt.Errorf(f, trust, err.Error())
-		}
-	}
-	p.certificate = params["certificate"]
-	p.hostInCertificate, ok = params["hostnameincertificate"]
-	if !ok {
-		p.hostInCertificate = p.host
-	}
-
-	serverSPN, ok := params["ServerSPN"]
-	if ok {
-		p.serverSPN = serverSPN
-	} else {
-		p.serverSPN = fmt.Sprintf("MSSQLSvc/%s:%d", p.host, p.port)
-	}
-
-	workstation, ok := params["Workstation ID"]
-	if ok {
-		p.workstation = workstation
-	} else {
-		workstation, err := os.Hostname()
-		if err == nil {
-			p.workstation = workstation
-		}
-	}
-
-	appname, ok := params["app name"]
-	if !ok {
-		appname = "go-mssqldb"
-	}
-	p.appname = appname
-
-	appintent, ok := params["applicationintent"]
-	if ok {
-		if appintent == "ReadOnly" {
-			p.typeFlags |= fReadOnlyIntent
-		}
-	}
-
-	return &p, nil
-}
-
-type Auth interface {
+type auth interface {
 	InitialBytes() ([]byte, error)
 	NextBytes([]byte) ([]byte, error)
 	Free()
@@ -774,7 +654,7 @@ type Auth interface {
 // SQL Server AlwaysOn Availability Group Listeners are bound by DNS to a
 // list of IP addresses.  So if there is more than one, try them all and
 // use the first one that allows a connection.
-func dialConnection(p *connectParams) (conn net.Conn, err error) {
+func dialConnection(ctx context.Context, c *Connector, p connectParams) (conn net.Conn, err error) {
 	var ips []net.IP
 	ips, err = net.LookupIP(p.host)
 	if err != nil {
@@ -785,19 +665,20 @@ func dialConnection(p *connectParams) (conn net.Conn, err error) {
 		ips = []net.IP{ip}
 	}
 	if len(ips) == 1 {
-		d := createDialer(p)
+		d := c.getDialer(&p)
 		addr := net.JoinHostPort(ips[0].String(), strconv.Itoa(int(p.port)))
-		conn, err = d.Dial("tcp", addr)
+		conn, err = d.DialContext(ctx, "tcp", addr)
 
 	} else {
 		//Try Dials in parallel to avoid waiting for timeouts.
 		connChan := make(chan net.Conn, len(ips))
 		errChan := make(chan error, len(ips))
+		portStr := strconv.Itoa(int(p.port))
 		for _, ip := range ips {
 			go func(ip net.IP) {
-				d := createDialer(p)
-				addr := net.JoinHostPort(ip.String(), strconv.Itoa(int(p.port)))
-				conn, err := d.Dial("tcp", addr)
+				d := c.getDialer(&p)
+				addr := net.JoinHostPort(ip.String(), portStr)
+				conn, err := d.DialContext(ctx, "tcp", addr)
 				if err == nil {
 					connChan <- conn
 				} else {
@@ -832,27 +713,49 @@ func dialConnection(p *connectParams) (conn net.Conn, err error) {
 		f := "Unable to open tcp connection with host '%v:%v': %v"
 		return nil, fmt.Errorf(f, p.host, p.port, err.Error())
 	}
-
 	return conn, err
 }
 
-func connect(params map[string]string) (res *tdsSession, err error) {
-	p, err := parseConnectParams(params)
-	if err != nil {
-		return nil, err
+func connect(ctx context.Context, c *Connector, log optionalLogger, p connectParams) (res *tdsSession, err error) {
+	dialCtx := ctx
+	if p.dial_timeout > 0 {
+		var cancel func()
+		dialCtx, cancel = context.WithTimeout(ctx, p.dial_timeout)
+		defer cancel()
+	}
+	// if instance is specified use instance resolution service
+	if p.instance != "" {
+		p.instance = strings.ToUpper(p.instance)
+		d := c.getDialer(&p)
+		instances, err := getInstances(dialCtx, d, p.host)
+		if err != nil {
+			f := "Unable to get instances from Sql Server Browser on host %v: %v"
+			return nil, fmt.Errorf(f, p.host, err.Error())
+		}
+		strport, ok := instances[p.instance]["tcp"]
+		if !ok {
+			f := "No instance matching '%v' returned from host '%v'"
+			return nil, fmt.Errorf(f, p.instance, p.host)
+		}
+		p.port, err = strconv.ParseUint(strport, 0, 16)
+		if err != nil {
+			f := "Invalid tcp port returned from Sql Server Browser '%v': %v"
+			return nil, fmt.Errorf(f, strport, err.Error())
+		}
 	}
 
 initiate_connection:
-	conn, err := dialConnection(p)
+	conn, err := dialConnection(dialCtx, c, p)
 	if err != nil {
 		return nil, err
 	}
 
-	toconn := NewTimeoutConn(conn, p.conn_timeout)
+	toconn := newTimeoutConn(conn, p.conn_timeout)
 
-	outbuf := newTdsBuffer(4096, toconn)
+	outbuf := newTdsBuffer(p.packetSize, toconn)
 	sess := tdsSession{
 		buf:      outbuf,
+		log:      log,
 		logFlags: p.logFlags,
 	}
 
@@ -898,8 +801,7 @@ initiate_connection:
 		if p.certificate != "" {
 			pem, err := ioutil.ReadFile(p.certificate)
 			if err != nil {
-				f := "Cannot read certificate '%s': %s"
-				return nil, fmt.Errorf(f, p.certificate, err.Error())
+				return nil, fmt.Errorf("Cannot read certificate %q: %v", p.certificate, err)
 			}
 			certs := x509.NewCertPool()
 			certs.AppendCertsFromPEM(pem)
@@ -909,15 +811,20 @@ initiate_connection:
 			config.InsecureSkipVerify = true
 		}
 		config.ServerName = p.hostInCertificate
-		outbuf.transport = conn
-		toconn.buf = outbuf
-		tlsConn := tls.Client(toconn, &config)
+		// fix for https://github.com/denisenkom/go-mssqldb/issues/166
+		// Go implementation of TLS payload size heuristic algorithm splits single TDS package to multiple TCP segments,
+		// while SQL Server seems to expect one TCP segment per encrypted TDS package.
+		// Setting DynamicRecordSizingDisabled to true disables that algorithm and uses 16384 bytes per TLS package
+		config.DynamicRecordSizingDisabled = true
+		// setting up connection handler which will allow wrapping of TLS handshake packets inside TDS stream
+		handshakeConn := tlsHandshakeConn{buf: outbuf}
+		passthrough := passthroughConn{c: &handshakeConn}
+		tlsConn := tls.Client(&passthrough, &config)
 		err = tlsConn.Handshake()
-		toconn.buf = nil
+		passthrough.c = toconn
 		outbuf.transport = tlsConn
 		if err != nil {
-			f := "TLS Handshake failed: %s"
-			return nil, fmt.Errorf(f, err.Error())
+			return nil, fmt.Errorf("TLS Handshake failed: %v", err)
 		}
 		if encrypt == encryptOff {
 			outbuf.afterFirst = func() {
@@ -928,7 +835,7 @@ initiate_connection:
 
 	login := login{
 		TDSVersion:   verTDS74,
-		PacketSize:   uint32(len(outbuf.buf)),
+		PacketSize:   uint32(outbuf.PackageSize()),
 		Database:     p.database,
 		OptionFlags2: fODBC, // to get unlimited TEXTSIZE
 		HostName:     p.workstation,
@@ -954,38 +861,43 @@ initiate_connection:
 	}
 
 	// processing login response
-	var sspi_msg []byte
-continue_login:
-	tokchan := make(chan tokenStruct, 5)
-	go processResponse(&sess, tokchan)
 	success := false
-	for tok := range tokchan {
-		switch token := tok.(type) {
-		case sspiMsg:
-			sspi_msg, err = auth.NextBytes(token)
-			if err != nil {
-				return nil, err
+	for {
+		tokchan := make(chan tokenStruct, 5)
+		go processResponse(context.Background(), &sess, tokchan, nil)
+		for tok := range tokchan {
+			switch token := tok.(type) {
+			case sspiMsg:
+				sspi_msg, err := auth.NextBytes(token)
+				if err != nil {
+					return nil, err
+				}
+				if sspi_msg != nil && len(sspi_msg) > 0 {
+					outbuf.BeginPacket(packSSPIMessage, false)
+					_, err = outbuf.Write(sspi_msg)
+					if err != nil {
+						return nil, err
+					}
+					err = outbuf.FinishPacket()
+					if err != nil {
+						return nil, err
+					}
+					sspi_msg = nil
+				}
+			case loginAckStruct:
+				success = true
+				sess.loginAck = token
+			case error:
+				return nil, fmt.Errorf("Login error: %s", token.Error())
+			case doneStruct:
+				if token.isError() {
+					return nil, fmt.Errorf("Login error: %s", token.getError())
+				}
+				goto loginEnd
 			}
-		case loginAckStruct:
-			success = true
-			sess.loginAck = token
-		case error:
-			return nil, fmt.Errorf("Login error: %s", token.Error())
 		}
 	}
-	if sspi_msg != nil {
-		outbuf.BeginPacket(packSSPIMessage)
-		_, err = outbuf.Write(sspi_msg)
-		if err != nil {
-			return nil, err
-		}
-		err = outbuf.FinishPacket()
-		if err != nil {
-			return nil, err
-		}
-		sspi_msg = nil
-		goto continue_login
-	}
+loginEnd:
 	if !success {
 		return nil, fmt.Errorf("Login failed")
 	}
@@ -993,6 +905,9 @@ continue_login:
 		toconn.Close()
 		p.host = sess.routedServer
 		p.port = uint64(sess.routedPort)
+		if !p.hostInCertificateProvided {
+			p.hostInCertificate = sess.routedServer
+		}
 		goto initiate_connection
 	}
 	return &sess, nil
